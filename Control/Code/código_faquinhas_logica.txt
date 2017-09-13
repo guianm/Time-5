@@ -1,0 +1,25 @@
+Função para receber velocidades
+---
+Recebe Velocidades (dot_x, dot_y, dot_w)
+	VelX = dot_x;
+	VelY = dot_y;
+	VelW = dot_w;
+
+Corrige Velocidades (dot_x, dot_y, dot_w);
+dot_w_desejada(MotorEsquerda) = - dot_y + (Dist_entre_rodas)*dot_w;
+dot_w_desejada(MotorEsquerda) *= (razão_da_redução)/(raio_da_roda);
+
+dot_w_desejada(MotorDireita) = + dot_y + (Dist_entre_rodas)*dot_w;
+dot_w_desejada(MotorDireita) *= (razão_da_redução)/(raio_da_roda);
+
+Vel_Roda_Esquerda = Vel_Motor_Esquerda_Encoder_atual*(razao_da_reduçao)/(raio_da_roda);
+Vel_Roda_Direita = Vel_Motor_Direita_Encoder_atual*(razao_da_reduçao)/(raio_da_roda);
+
+
+VelX = 0;
+VelY = (Vel_Roda_Direita - Vel_Roda_Esquerda)/2;
+VelW = (Vel_Roda_Direita + Vel_Roda_Esquerda)/(Dist_entre_rodas);
+
+
+
+

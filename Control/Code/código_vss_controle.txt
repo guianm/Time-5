@@ -1,0 +1,688 @@
+ --- 1 ---
+
+/* Includes SubZeroBoard */
+#include <SubZeroBoard/subzeroboard.h>
+
+/* Includes module private header */
+#include <SubZeroBoard/MotorControl/motorcontrol_private.h>
+
+
+/* Includes dsPIC33 libraries */
+#include <p33Fxxxx.h>
+
+
+float motorControl_lastVoltages[MOTORCONTROL_NUM_MOTORS][2] = {{0}};
+float motorControl_controlOutputVoltages[MOTORCONTROL_NUM_MOTORS] = {{0}};
+float motorControl_controlOutputCurrents[MOTORCONTROL_NUM_MOTORS] = {{0}};
+
+float motorControl_lastSpeeds[MOTORCONTROL_NUM_SPEEDS][2] = {{0}};
+float motorControl_controlOutputSpeeds[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+
+float motorControl_playerController_lastErrorCont[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_integralError[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+
+/* Module internal variables */
+uint8 motorControl_running = 0;
+uint8 motorControl_stopped = 0;
+uint8 motorControl_stable = 0;
+
+float motorControl_lastConversionTime = 0.0;
+
+/* Control variables */
+float motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_NUM_MOTORS] = {{0}};
+float motorControl_motorsController_lastError[MOTORCONTROL_NUM_MOTORS][MOTORCONTROL_PID_NUM_ERRORS] = {{0}};
+float motorControl_motorsController_Q0[MOTORCONTROL_NUM_MOTORS] = {{0}};
+float motorControl_motorsController_Q1[MOTORCONTROL_NUM_MOTORS] = {{0}};
+float motorControl_motorsController_Q2[MOTORCONTROL_NUM_MOTORS] = {{0}};
+
+float motorControl_desiredPlayerSpeeds[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_lastError[MOTORCONTROL_NUM_SPEEDS][MOTORCONTROL_PID_NUM_ERRORS] = {{0}} ;
+float motorControl_playerController_Q0[MOTORCONTROL_NUM_SPEEDS] = {{0}} ;
+float motorControl_playerController_Q1[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_Q2[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+
+float motorControl_playerController_KP[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_KI[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_KD[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_N[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+
+double ke0[MOTORCONTROL_NUM_SPEEDS], ke1[MOTORCONTROL_NUM_SPEEDS], ke2[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+double ku1[MOTORCONTROL_NUM_SPEEDS], ku2[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float pidDiscreteErrors[MOTORCONTROL_NUM_SPEEDS][3] = {{0}};
+
+void motorControl_config() {
+    /* Initializes variables */
+    motorControl_running = 0;
+    motorControl_stable  = 0;
+
+    /* Configures the ports */
+    motorControl_configPorts();
+
+    /* Configures the sub-modules */
+    motorAnalysis_config();
+    motorDriver_config();
+
+    /* Configures the control algorithm */
+    motorControl_configControl();
+}
+
+void motorControl_configPorts() {}
+
+void motorControl_configControl() {
+    /* Configures the controllers */
+    motorControl_configPlayerControl();
+    motorControl_configMotorsControl();
+    
+    motorControl_computeDiscretePidConstants();
+
+    /* Initializes the variables */
+    motorControl_lastConversionTime = 0.0;
+}
+
+void motorControl_configMotorsControl() {
+    /* Initializes control set-points */
+    int i;
+    for (i = 0; i < MOTORCONTROL_NUM_MOTORS; i++) {
+
+        motorControl_motorsController_lastError[i][0] = 0.0;
+        motorControl_motorsController_lastError[i][1] = 0.0;
+        motorControl_motorsController_lastError[i][2] = 0.0;
+
+        motorControl_motorsController_Q0[i] = MOTORCONTROL_MOTORS_Q0;
+        motorControl_motorsController_Q1[i] = MOTORCONTROL_MOTORS_Q1;
+        motorControl_motorsController_Q2[i] = MOTORCONTROL_MOTORS_Q2;
+    }
+}
+
+void motorControl_configPlayerControl() {
+    /* Initializes control set-points */
+    int i;
+    for (i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++) {
+
+        motorControl_playerController_lastError[i][0] = 0.0;
+        motorControl_playerController_lastError[i][1] = 0.0;
+        motorControl_playerController_lastError[i][2] = 0.0;
+    }
+    
+    motorControl_playerController_lastErrorCont[MOTORCONTROL_X_SPEED]       = 0.0;
+    motorControl_playerController_lastErrorCont[MOTORCONTROL_Y_SPEED]       = 0.0;
+    motorControl_playerController_lastErrorCont[MOTORCONTROL_ANGULAR_SPEED] = 0.0;
+
+    motorControl_playerController_integralError[MOTORCONTROL_X_SPEED]       = 0.0;
+    motorControl_playerController_integralError[MOTORCONTROL_Y_SPEED]       = 0.0;
+    motorControl_playerController_integralError[MOTORCONTROL_ANGULAR_SPEED] = 0.0;
+    
+    motorControl_playerController_KP[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_KI[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_KD[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_N[MOTORCONTROL_X_SPEED]  = 0.0;
+
+    motorControl_playerController_KP[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_LINEAR_KP;
+    motorControl_playerController_KI[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_LINEAR_KI;
+    motorControl_playerController_KD[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_LINEAR_KD;
+    motorControl_playerController_N[MOTORCONTROL_Y_SPEED]  = MOTORCONTROL_PLAYER_LINEAR_N;
+
+    motorControl_playerController_KP[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_KP;
+    motorControl_playerController_KI[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_KI;
+    motorControl_playerController_KD[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_KD;
+    motorControl_playerController_N[MOTORCONTROL_ANGULAR_SPEED]  = MOTORCONTROL_PLAYER_ANGULAR_N;
+        
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_X_SPEED]       = 0.0;
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_Y_SPEED]       = 0.0;
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_ANGULAR_SPEED] = 0.0;
+
+    motorControl_playerController_Q0[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_Q1[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_Q2[MOTORCONTROL_X_SPEED] = 0.0;
+
+    motorControl_playerController_Q0[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_Y_SPEED_Q0;
+    motorControl_playerController_Q1[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_Y_SPEED_Q1;
+    motorControl_playerController_Q2[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_Y_SPEED_Q2;
+
+    motorControl_playerController_Q0[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_Q0;
+    motorControl_playerController_Q1[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_Q1;
+    motorControl_playerController_Q2[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_Q2;
+}
+
+
+void motorControl_start() {
+    /* Sets module as running */
+    motorControl_running = 1;
+}
+
+void motorControl_stop() {
+    /* Sets module as stopped */
+    motorControl_stopped = 1;
+}
+
+uint8 motorControl_isRunning() {
+    /* Returns the flag */
+    return(motorControl_running);
+}
+
+uint8 motorControl_isStopped(){
+    return(motorControl_stopped);
+}
+
+uint8 motorControl_isStable() {
+    /* Returns the flag */
+    //return(motorControl_stable);
+    return(1);
+}
+
+
+void motorControl_setSpeed(float xSpeed, float ySpeed, float angularSpeed) {
+    /* Changes the set-points */
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_X_SPEED]       = xSpeed;
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_Y_SPEED]       = ySpeed;
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_ANGULAR_SPEED] = angularSpeed;
+}
+
+
+void motorControl_calculateDesiredMotorAngularSpeeds(float xSpeed, float ySpeed, float angularSpeed) {
+    /* Sets the motor set-points */
+    (void)xSpeed;
+
+    motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_LEFT_MOTOR]  = -ySpeed + (MOTORCONTROL_PARAM_WHEELS_DISTANCE/2.0)*angularSpeed;
+    motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_LEFT_MOTOR] *= MOTORCONTROL_PARAM_GEARBOX_RATIO/MOTORCONTROL_PARAM_WHEEL_RADIUS;
+
+    motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_RIGHT_MOTOR]  = ySpeed + (MOTORCONTROL_PARAM_WHEELS_DISTANCE/2.0)*angularSpeed;
+    motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_RIGHT_MOTOR] *= MOTORCONTROL_PARAM_GEARBOX_RATIO/MOTORCONTROL_PARAM_WHEEL_RADIUS;
+}
+
+void motorControl_calculatePlayerSpeeds() {
+    /* Calculates the wheel speeds */
+    float leftWheelSpeed  = subZeroBoard_motorSpeeds[MOTORCONTROL_LEFT_MOTOR]*MOTORCONTROL_PARAM_WHEEL_RADIUS/MOTORCONTROL_PARAM_GEARBOX_RATIO;
+    float rightWheelSpeed = subZeroBoard_motorSpeeds[MOTORCONTROL_RIGHT_MOTOR]*MOTORCONTROL_PARAM_WHEEL_RADIUS/MOTORCONTROL_PARAM_GEARBOX_RATIO;
+
+    /* Calculates the player speeds */
+    subZeroBoard_playerSpeeds[MOTORCONTROL_X_SPEED]       = 0.0;
+    subZeroBoard_playerSpeeds[MOTORCONTROL_Y_SPEED]       = (rightWheelSpeed - leftWheelSpeed)/2.0;
+    subZeroBoard_playerSpeeds[MOTORCONTROL_ANGULAR_SPEED] = (rightWheelSpeed + leftWheelSpeed)/MOTORCONTROL_PARAM_WHEELS_DISTANCE;
+}
+
+void motorControl_computeDiscretePidConstants() {
+    uint8 i,j;
+    for (i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++){
+        double a0, a1, a2, b0, b1, b2;
+
+        a0 = (1+motorControl_playerController_N[i]*0.001);
+        a1 = -(2+motorControl_playerController_N[i]*0.001);
+        a2 = 1;
+        b0 = motorControl_playerController_KP[i]*(1+motorControl_playerController_N[i]*0.001)+
+             motorControl_playerController_KI[i]*0.001*(1+motorControl_playerController_N[i]*0.001)+
+             motorControl_playerController_KD[i]*motorControl_playerController_N[i];
+        b1 = -(motorControl_playerController_KP[i]*(2+motorControl_playerController_N[i]*0.001)+
+             motorControl_playerController_KI[i]*0.001 + 2*motorControl_playerController_KD[i]*motorControl_playerController_N[i]);
+        b2 = motorControl_playerController_KP[i] + motorControl_playerController_KD[i]*motorControl_playerController_N[i];
+        ku1[i] = a1/a0;
+        ku2[i] = a2/a0;
+        ke0[i] = b0/a0;
+ 
+/* Includes SubZeroBoard */
+#include <SubZeroBoard/subzeroboard.h>
+
+/* Includes module private header */
+#include <SubZeroBoard/MotorControl/motorcontrol_private.h>
+
+
+/* Includes dsPIC33 libraries */
+#include <p33Fxxxx.h>
+
+
+float motorControl_lastVoltages[MOTORCONTROL_NUM_MOTORS][2] = {{0}};
+float motorControl_controlOutputVoltages[MOTORCONTROL_NUM_MOTORS] = {{0}};
+float motorControl_controlOutputCurrents[MOTORCONTROL_NUM_MOTORS] = {{0}};
+
+float motorControl_lastSpeeds[MOTORCONTROL_NUM_SPEEDS][2] = {{0}};
+float motorControl_controlOutputSpeeds[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+
+float motorControl_playerController_lastErrorCont[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_integralError[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+
+/* Module internal variables */
+uint8 motorControl_running = 0;
+uint8 motorControl_stopped = 0;
+uint8 motorControl_stable = 0;
+
+float motorControl_lastConversionTime = 0.0;
+
+/* Control variables */
+float motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_NUM_MOTORS] = {{0}};
+float motorControl_motorsController_lastError[MOTORCONTROL_NUM_MOTORS][MOTORCONTROL_PID_NUM_ERRORS] = {{0}};
+float motorControl_motorsController_Q0[MOTORCONTROL_NUM_MOTORS] = {{0}};
+float motorControl_motorsController_Q1[MOTORCONTROL_NUM_MOTORS] = {{0}};
+float motorControl_motorsController_Q2[MOTORCONTROL_NUM_MOTORS] = {{0}};
+
+float motorControl_desiredPlayerSpeeds[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_lastError[MOTORCONTROL_NUM_SPEEDS][MOTORCONTROL_PID_NUM_ERRORS] = {{0}} ;
+float motorControl_playerController_Q0[MOTORCONTROL_NUM_SPEEDS] = {{0}} ;
+float motorControl_playerController_Q1[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_Q2[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+
+float motorControl_playerController_KP[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_KI[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_KD[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float motorControl_playerController_N[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+
+double ke0[MOTORCONTROL_NUM_SPEEDS], ke1[MOTORCONTROL_NUM_SPEEDS], ke2[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+double ku1[MOTORCONTROL_NUM_SPEEDS], ku2[MOTORCONTROL_NUM_SPEEDS] = {{0}};
+float pidDiscreteErrors[MOTORCONTROL_NUM_SPEEDS][3] = {{0}};
+
+void motorControl_config() {
+    /* Initializes variables */
+    motorControl_running = 0;
+    motorControl_stable  = 0;
+
+    /* Configures the ports */
+    motorControl_configPorts();
+
+    /* Configures the sub-modules */
+    motorAnalysis_config();
+    motorDriver_config();
+
+    /* Configures the control algorithm */
+    motorControl_configControl();
+}
+
+void motorControl_configPorts() {}
+
+void motorControl_configControl() {
+    /* Configures the controllers */
+    motorControl_configPlayerControl();
+    motorControl_configMotorsControl();
+    
+    motorControl_computeDiscretePidConstants();
+
+    /* Initializes the variables */
+    motorControl_lastConversionTime = 0.0;
+}
+
+void motorControl_configMotorsControl() {
+    /* Initializes control set-points */
+    int i;
+    for (i = 0; i < MOTORCONTROL_NUM_MOTORS; i++) {
+
+        motorControl_motorsController_lastError[i][0] = 0.0;
+        motorControl_motorsController_lastError[i][1] = 0.0;
+        motorControl_motorsController_lastError[i][2] = 0.0;
+
+        motorControl_motorsController_Q0[i] = MOTORCONTROL_MOTORS_Q0;
+        motorControl_motorsController_Q1[i] = MOTORCONTROL_MOTORS_Q1;
+        motorControl_motorsController_Q2[i] = MOTORCONTROL_MOTORS_Q2;
+    }
+}
+
+void motorControl_configPlayerControl() {
+    /* Initializes control set-points */
+    int i;
+    for (i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++) {
+
+        motorControl_playerController_lastError[i][0] = 0.0;
+        motorControl_playerController_lastError[i][1] = 0.0;
+        motorControl_playerController_lastError[i][2] = 0.0;
+    }
+    
+    motorControl_playerController_lastErrorCont[MOTORCONTROL_X_SPEED]       = 0.0;
+    motorControl_playerController_lastErrorCont[MOTORCONTROL_Y_SPEED]       = 0.0;
+    motorControl_playerController_lastErrorCont[MOTORCONTROL_ANGULAR_SPEED] = 0.0;
+
+    motorControl_playerController_integralError[MOTORCONTROL_X_SPEED]       = 0.0;
+    motorControl_playerController_integralError[MOTORCONTROL_Y_SPEED]       = 0.0;
+    motorControl_playerController_integralError[MOTORCONTROL_ANGULAR_SPEED] = 0.0;
+    
+    motorControl_playerController_KP[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_KI[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_KD[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_N[MOTORCONTROL_X_SPEED]  = 0.0;
+
+    motorControl_playerController_KP[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_LINEAR_KP;
+    motorControl_playerController_KI[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_LINEAR_KI;
+    motorControl_playerController_KD[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_LINEAR_KD;
+    motorControl_playerController_N[MOTORCONTROL_Y_SPEED]  = MOTORCONTROL_PLAYER_LINEAR_N;
+
+    motorControl_playerController_KP[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_KP;
+    motorControl_playerController_KI[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_KI;
+    motorControl_playerController_KD[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_KD;
+    motorControl_playerController_N[MOTORCONTROL_ANGULAR_SPEED]  = MOTORCONTROL_PLAYER_ANGULAR_N;
+        
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_X_SPEED]       = 0.0;
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_Y_SPEED]       = 0.0;
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_ANGULAR_SPEED] = 0.0;
+
+    motorControl_playerController_Q0[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_Q1[MOTORCONTROL_X_SPEED] = 0.0;
+    motorControl_playerController_Q2[MOTORCONTROL_X_SPEED] = 0.0;
+
+    motorControl_playerController_Q0[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_Y_SPEED_Q0;
+    motorControl_playerController_Q1[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_Y_SPEED_Q1;
+    motorControl_playerController_Q2[MOTORCONTROL_Y_SPEED] = MOTORCONTROL_PLAYER_Y_SPEED_Q2;
+
+    motorControl_playerController_Q0[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_Q0;
+    motorControl_playerController_Q1[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_Q1;
+    motorControl_playerController_Q2[MOTORCONTROL_ANGULAR_SPEED] = MOTORCONTROL_PLAYER_ANGULAR_Q2;
+}
+
+
+void motorControl_start() {
+    /* Sets module as running */
+    motorControl_running = 1;
+}
+
+void motorControl_stop() {
+    /* Sets module as stopped */
+    motorControl_stopped = 1;
+}
+
+uint8 motorControl_isRunning() {
+    /* Returns the flag */
+    return(motorControl_running);
+}
+
+uint8 motorControl_isStopped(){
+    return(motorControl_stopped);
+}
+
+uint8 motorControl_isStable() {
+    /* Returns the flag */
+    //return(motorControl_stable);
+    return(1);
+}
+
+
+void motorControl_setSpeed(float xSpeed, float ySpeed, float angularSpeed) {
+    /* Changes the set-points */
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_X_SPEED]       = xSpeed;
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_Y_SPEED]       = ySpeed;
+    motorControl_desiredPlayerSpeeds[MOTORCONTROL_ANGULAR_SPEED] = angularSpeed;
+}
+
+
+void motorControl_calculateDesiredMotorAngularSpeeds(float xSpeed, float ySpeed, float angularSpeed) {
+    /* Sets the motor set-points */
+    (void)xSpeed;
+
+    motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_LEFT_MOTOR]  = -ySpeed + (MOTORCONTROL_PARAM_WHEELS_DISTANCE/2.0)*angularSpeed;
+    motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_LEFT_MOTOR] *= MOTORCONTROL_PARAM_GEARBOX_RATIO/MOTORCONTROL_PARAM_WHEEL_RADIUS;
+
+    motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_RIGHT_MOTOR]  = ySpeed + (MOTORCONTROL_PARAM_WHEELS_DISTANCE/2.0)*angularSpeed;
+    motorControl_desiredMotorAngularSpeeds[MOTORCONTROL_RIGHT_MOTOR] *= MOTORCONTROL_PARAM_GEARBOX_RATIO/MOTORCONTROL_PARAM_WHEEL_RADIUS;
+}
+
+void motorControl_calculatePlayerSpeeds() {
+    /* Calculates the wheel speeds */
+    float leftWheelSpeed  = subZeroBoard_motorSpeeds[MOTORCONTROL_LEFT_MOTOR]*MOTORCONTROL_PARAM_WHEEL_RADIUS/MOTORCONTROL_PARAM_GEARBOX_RATIO;
+    float rightWheelSpeed = subZeroBoard_motorSpeeds[MOTORCONTROL_RIGHT_MOTOR]*MOTORCONTROL_PARAM_WHEEL_RADIUS/MOTORCONTROL_PARAM_GEARBOX_RATIO;
+
+    /* Calculates the player speeds */
+    subZeroBoard_playerSpeeds[MOTORCONTROL_X_SPEED]       = 0.0;
+    subZeroBoard_playerSpeeds[MOTORCONTROL_Y_SPEED]       = (rightWheelSpeed - leftWheelSpeed)/2.0;
+    subZeroBoard_playerSpeeds[MOTORCONTROL_ANGULAR_SPEED] = (rightWheelSpeed + leftWheelSpeed)/MOTORCONTROL_PARAM_WHEELS_DISTANCE;
+}
+
+void motorControl_computeDiscretePidConstants() {
+    uint8 i,j;
+    for (i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++){
+        double a0, a1, a2, b0, b1, b2;
+
+        a0 = (1+motorControl_playerController_N[i]*0.001);
+        a1 = -(2+motorControl_playerController_N[i]*0.001);
+        a2 = 1;
+        b0 = motorControl_playerController_KP[i]*(1+motorControl_playerController_N[i]*0.001)+
+             motorControl_playerController_KI[i]*0.001*(1+motorControl_playerController_N[i]*0.001)+
+             motorControl_playerController_KD[i]*motorControl_playerController_N[i];
+        b1 = -(motorControl_playerController_KP[i]*(2+motorControl_playerController_N[i]*0.001)+
+             motorControl_playerController_KI[i]*0.001 + 2*motorControl_playerController_KD[i]*motorControl_playerController_N[i]);
+        b2 = motorControl_playerController_KP[i] + motorControl_playerController_KD[i]*motorControl_playerController_N[i];
+        ku1[i] = a1/a0;
+        ku2[i] = a2/a0;
+        ke0[i] = b0/a0;
+        ke1[i] = b1/a0; 
+        ke2[i] = b2/a0;    
+    }
+    
+    for(i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++){
+        for(j = 0; j < 3; j++){
+            pidDiscreteErrors[i][j] = 0;
+            motorControl_lastSpeeds[i][j] = 0;
+        }
+    }
+}
+
+void motorControl_controlPlayerSpeedsC2D(){
+    uint8 i;
+    for (i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++){
+        pidDiscreteErrors[i][2] = pidDiscreteErrors[i][1];
+        pidDiscreteErrors[i][1] = pidDiscreteErrors[i][0];
+        pidDiscreteErrors[i][0] = motorControl_desiredPlayerSpeeds[i] - subZeroBoard_playerSpeeds[i];
+        motorControl_lastSpeeds[i][1] = motorControl_lastSpeeds[i][0];
+        
+        motorControl_lastSpeeds[i][0] = motorControl_controlOutputSpeeds[i];
+        
+        motorControl_controlOutputSpeeds[i] = -ku1[i]*motorControl_lastSpeeds[i][0]
+                                              - ku2[i]*motorControl_lastSpeeds[i][1]
+                                              + ke0[i]*pidDiscreteErrors[i][0] + ke1[i]*pidDiscreteErrors[i][1]
+                                              + ke2[i]*pidDiscreteErrors[i][2];
+    }
+    /* Sets the motor speeds set-points */
+    motorControl_calculateDesiredMotorAngularSpeeds(0.0, motorControl_controlOutputSpeeds[MOTORCONTROL_Y_SPEED], motorControl_controlOutputSpeeds[MOTORCONTROL_ANGULAR_SPEED]);
+}
+
+void motorControl_controlPlayerSpeedsDiscrete(){
+    uint8 i;
+    float aux;
+    
+    for (i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++){
+        motorControl_playerController_lastError[i][2] = motorControl_playerController_lastError[i][1];
+        motorControl_playerController_lastError[i][1] = motorControl_playerController_lastError[i][0];
+        motorControl_playerController_lastError[i][0] = motorControl_desiredPlayerSpeeds[i] - subZeroBoard_playerSpeeds[i];
+        motorControl_lastSpeeds[i][0] = motorControl_controlOutputSpeeds[i];
+        
+        //u(k) = u(k - 1) + q 0 e(k) + q 1 e(k - 1) + q 2 e(k - 2)
+        aux = motorControl_lastSpeeds[i][0] 
+              + motorControl_playerController_Q0[i]*motorControl_playerController_lastError[i][0]
+              + motorControl_playerController_Q1[i]*motorControl_playerController_lastError[i][1]
+              + motorControl_playerController_Q2[i]*motorControl_playerController_lastError[i][2];
+
+        motorControl_controlOutputSpeeds[i] = aux;
+    }
+    /* Sets the motor speeds set-points */
+    motorControl_calculateDesiredMotorAngularSpeeds(0.0, motorControl_controlOutputSpeeds[MOTORCONTROL_Y_SPEED], motorControl_controlOutputSpeeds[MOTORCONTROL_ANGULAR_SPEED]);
+}
+
+void motorControl_controlPlayerSpeedsContinuous(float period) {
+    /* Variables */
+    uint8 i;
+    float error[MOTORCONTROL_NUM_SPEEDS];
+    float derivativeError[MOTORCONTROL_NUM_SPEEDS];
+    float output[MOTORCONTROL_NUM_SPEEDS];
+
+    /* Controls the player Y and angular speeds */
+    for (i = 1; i < MOTORCONTROL_NUM_SPEEDS; i++) {
+        error[i] = motorControl_desiredPlayerSpeeds[i] - subZeroBoard_playerSpeeds[i];
+        motorControl_playerController_integralError[i] += period*((error[i]+motorControl_playerController_lastErrorCont[i])/2.0);
+        float den = (1.0+(motorControl_playerController_N[i]*motorControl_playerController_integralError[i]));
+        if(den==0.0)
+            den = 0.001;
+        derivativeError[i] = motorControl_playerController_N[i]/den;
+        motorControl_playerController_lastErrorCont[i] = error[i];
+
+        output[i] = motorControl_playerController_KP[i]*error[i]
+                    + motorControl_playerController_KI[i]*motorControl_playerController_integralError[i]
+                    + motorControl_playerController_KD[i]*derivativeError[i];
+    }
+
+    /* Sets the motor speeds set-points */
+    motorControl_calculateDesiredMotorAngularSpeeds(0.0, output[MOTORCONTROL_Y_SPEED], output[MOTORCONTROL_ANGULAR_SPEED]);
+}
+
+void motorControl_controlMotorSpeeds(){
+    uint8 i;
+    
+    for (i = 0; i < MOTORCONTROL_NUM_MOTORS; i++){
+        motorControl_motorsController_lastError[i][2] = motorControl_motorsController_lastError[i][1];
+        motorControl_motorsController_lastError[i][1] = motorControl_motorsController_lastError[i][0];
+        motorControl_motorsController_lastError[i][0] = motorControl_desiredMotorAngularSpeeds[i] - subZeroBoard_motorSpeeds[i];
+        motorControl_lastVoltages[i][0] = motorControl_controlOutputVoltages[i];
+        
+        //u(k) = u(k - 1) + q 0 e(k) + q 1 e(k - 1) + q 2 e(k - 2)
+        motorControl_controlOutputVoltages[i] = motorControl_lastVoltages[i][0] 
+              + motorControl_motorsController_Q0[i]*motorControl_motorsController_lastError[i][0]
+              + motorControl_motorsController_Q1[i]*motorControl_motorsController_lastError[i][1]
+              + motorControl_motorsController_Q2[i]*motorControl_motorsController_lastError[i][2];
+    }
+
+    /* Sets the motor voltages */
+    motorDriver_setMotorsVoltages();
+}
+
+void motorControl_taskHandler(float currentTime) {
+    /* Variables */
+    float period;
+
+    /* Reads the encoders */
+    motorAnalysis_taskHandler(currentTime);
+
+    /* Calculates the player speeds */
+    motorControl_calculatePlayerSpeeds();
+
+    /* Calculates the period */
+    period = currentTime-motorControl_lastConversionTime;
+    motorControl_lastConversionTime = currentTime;
+
+    /* Controls the player speeds */
+//    motorControl_controlPlayerSpeedsContinuous(period); // PID Continuous 
+//    motorControl_controlPlayerSpeedsDiscrete(); // PID Discrete
+    motorControl_controlPlayerSpeedsC2D(); // PID Continuous converted to discrete
+
+    /* Controls the motor angular speeds */
+    motorControl_controlMotorSpeeds();
+
+    /* Drives the motors */
+    motorDriver_taskHandler(currentTime);
+}
+
+        ke1[i] = b1/a0; 
+        ke2[i] = b2/a0;    
+    }
+    
+    for(i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++){
+        for(j = 0; j < 3; j++){
+            pidDiscreteErrors[i][j] = 0;
+            motorControl_lastSpeeds[i][j] = 0;
+        }
+    }
+}
+
+void motorControl_controlPlayerSpeedsC2D(){
+    uint8 i;
+    for (i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++){
+        pidDiscreteErrors[i][2] = pidDiscreteErrors[i][1];
+        pidDiscreteErrors[i][1] = pidDiscreteErrors[i][0];
+        pidDiscreteErrors[i][0] = motorControl_desiredPlayerSpeeds[i] - subZeroBoard_playerSpeeds[i];
+        motorControl_lastSpeeds[i][1] = motorControl_lastSpeeds[i][0];
+        
+        motorControl_lastSpeeds[i][0] = motorControl_controlOutputSpeeds[i];
+        
+        motorControl_controlOutputSpeeds[i] = -ku1[i]*motorControl_lastSpeeds[i][0]
+                                              - ku2[i]*motorControl_lastSpeeds[i][1]
+                                              + ke0[i]*pidDiscreteErrors[i][0] + ke1[i]*pidDiscreteErrors[i][1]
+                                              + ke2[i]*pidDiscreteErrors[i][2];
+    }
+    /* Sets the motor speeds set-points */
+    motorControl_calculateDesiredMotorAngularSpeeds(0.0, motorControl_controlOutputSpeeds[MOTORCONTROL_Y_SPEED], motorControl_controlOutputSpeeds[MOTORCONTROL_ANGULAR_SPEED]);
+}
+
+void motorControl_controlPlayerSpeedsDiscrete(){
+    uint8 i;
+    float aux;
+    
+    for (i = 0; i < MOTORCONTROL_NUM_SPEEDS; i++){
+        motorControl_playerController_lastError[i][2] = motorControl_playerController_lastError[i][1];
+        motorControl_playerController_lastError[i][1] = motorControl_playerController_lastError[i][0];
+        motorControl_playerController_lastError[i][0] = motorControl_desiredPlayerSpeeds[i] - subZeroBoard_playerSpeeds[i];
+        motorControl_lastSpeeds[i][0] = motorControl_controlOutputSpeeds[i];
+        
+        //u(k) = u(k - 1) + q 0 e(k) + q 1 e(k - 1) + q 2 e(k - 2)
+        aux = motorControl_lastSpeeds[i][0] 
+              + motorControl_playerController_Q0[i]*motorControl_playerController_lastError[i][0]
+              + motorControl_playerController_Q1[i]*motorControl_playerController_lastError[i][1]
+              + motorControl_playerController_Q2[i]*motorControl_playerController_lastError[i][2];
+
+        motorControl_controlOutputSpeeds[i] = aux;
+    }
+    /* Sets the motor speeds set-points */
+    motorControl_calculateDesiredMotorAngularSpeeds(0.0, motorControl_controlOutputSpeeds[MOTORCONTROL_Y_SPEED], motorControl_controlOutputSpeeds[MOTORCONTROL_ANGULAR_SPEED]);
+}
+
+void motorControl_controlPlayerSpeedsContinuous(float period) {
+    /* Variables */
+    uint8 i;
+    float error[MOTORCONTROL_NUM_SPEEDS];
+    float derivativeError[MOTORCONTROL_NUM_SPEEDS];
+    float output[MOTORCONTROL_NUM_SPEEDS];
+
+    /* Controls the player Y and angular speeds */
+    for (i = 1; i < MOTORCONTROL_NUM_SPEEDS; i++) {
+        error[i] = motorControl_desiredPlayerSpeeds[i] - subZeroBoard_playerSpeeds[i];
+        motorControl_playerController_integralError[i] += period*((error[i]+motorControl_playerController_lastErrorCont[i])/2.0);
+        float den = (1.0+(motorControl_playerController_N[i]*motorControl_playerController_integralError[i]));
+        if(den==0.0)
+            den = 0.001;
+        derivativeError[i] = motorControl_playerController_N[i]/den;
+        motorControl_playerController_lastErrorCont[i] = error[i];
+
+        output[i] = motorControl_playerController_KP[i]*error[i]
+                    + motorControl_playerController_KI[i]*motorControl_playerController_integralError[i]
+                    + motorControl_playerController_KD[i]*derivativeError[i];
+    }
+
+    /* Sets the motor speeds set-points */
+    motorControl_calculateDesiredMotorAngularSpeeds(0.0, output[MOTORCONTROL_Y_SPEED], output[MOTORCONTROL_ANGULAR_SPEED]);
+}
+
+void motorControl_controlMotorSpeeds(){
+    uint8 i;
+    
+    for (i = 0; i < MOTORCONTROL_NUM_MOTORS; i++){
+        motorControl_motorsController_lastError[i][2] = motorControl_motorsController_lastError[i][1];
+        motorControl_motorsController_lastError[i][1] = motorControl_motorsController_lastError[i][0];
+        motorControl_motorsController_lastError[i][0] = motorControl_desiredMotorAngularSpeeds[i] - subZeroBoard_motorSpeeds[i];
+        motorControl_lastVoltages[i][0] = motorControl_controlOutputVoltages[i];
+        
+        //u(k) = u(k - 1) + q 0 e(k) + q 1 e(k - 1) + q 2 e(k - 2)
+        motorControl_controlOutputVoltages[i] = motorControl_lastVoltages[i][0] 
+              + motorControl_motorsController_Q0[i]*motorControl_motorsController_lastError[i][0]
+              + motorControl_motorsController_Q1[i]*motorControl_motorsController_lastError[i][1]
+              + motorControl_motorsController_Q2[i]*motorControl_motorsController_lastError[i][2];
+    }
+
+    /* Sets the motor voltages */
+    motorDriver_setMotorsVoltages();
+}
+
+void motorControl_taskHandler(float currentTime) {
+    /* Variables */
+    float period;
+
+    /* Reads the encoders */
+    motorAnalysis_taskHandler(currentTime);
+
+    /* Calculates the player speeds */
+    motorControl_calculatePlayerSpeeds();
+
+    /* Calculates the period */
+    period = currentTime-motorControl_lastConversionTime;
+    motorControl_lastConversionTime = currentTime;
+
+    /* Controls the player speeds */
+//    motorControl_controlPlayerSpeedsContinuous(period); // PID Continuous 
+//    motorControl_controlPlayerSpeedsDiscrete(); // PID Discrete
+    motorControl_controlPlayerSpeedsC2D(); // PID Continuous converted to discrete
+
+    /* Controls the motor angular speeds */
+    motorControl_controlMotorSpeeds();
+
+    /* Drives the motors */
+    motorDriver_taskHandler(currentTime);
+}
