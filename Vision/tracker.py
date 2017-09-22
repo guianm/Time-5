@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 # Constants for image resizing
-DEF_RESOLUTION = (320, 240)
+DEF_RESOLUTION = (2*320, 2*240)
 
 # Create color dictionary
 color = dict()
@@ -49,19 +49,28 @@ def morpho_operation(img_mask):
     return(img_mask)
 
 
-def set_targets(img_mask, original_img):
+def find_targets(img_mask, original_img, draw_contours=False):
     """Computes the borders of mask and draw circles around each one."""
 
     # Compute the contours of each color area of the mask
     image, contours, hierarquy = cv2.findContours(img_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(original_img, contours, -1, (0, 0, 255), 3)
 
-    # Draw a circle around each mask area
-    for c in contours:
-        (x, y), radius = cv2.minEnclosingCircle(c)
-        center = (int(x), int(y))
-        radius = int(radius)
-        circle_img = cv2.circle(original_img, center, radius, (0, 255, 0), 2)
+    if draw_contours is True:
+        cv2.drawContours(original_img, contours, -1, (0, 0, 255), 2)
+
+    # Skip color
+    if len(contours) > 0:
+        # Find the contour with maximum area
+        best_cnt = max(contours, key=cv2.contourArea)
+        # ((x, y), radius) = cv2.minEnclosingCircle(c)
+        M = cv2.moments(best_cnt)
+        centroid = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+
+        circle_img = cv2.circle(original_img, centroid, 10, (0, 255, 0), 2)
+            # (x, y), radius = cv2.minEnclosingCircle(c)
+            # center = (int(x), int(y))
+            # radius = int(radius)
+            # circle_img = cv2.circle(original_img, center, radius, (0, 255, 0), 2)
 
 
 def main():
@@ -91,7 +100,7 @@ def main():
             cv2.imshow('Mask_morpho', img_mask)
 
             # Find image contours
-            set_targets(img_mask, frame)
+            find_targets(img_mask, frame, draw_contours=True)
 
         # Display the frame
         cv2.imshow('Camera', frame)
