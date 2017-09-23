@@ -3,7 +3,26 @@ import cv2
 import numpy as np
 from picamera.array import PiRGBArray
 from picamera import PiCamera
+import RPi.GPIO as GPIO
 
+last_delta = 0
+# Configure GPIO module
+GPIO.setmode(GPIO.BCM)
+
+# Motor 1
+GPIO.setup(12, GPIO.OUT)
+GPIO.setup(16, GPIO.OUT)
+# Motor 2
+GPIO.setup(13, GPIO.OUT)
+GPIO.setup(19, GPIO.OUT)
+GPIO.setup(26, GPIO.OUT)
+
+GPIO.output(16, GPIO.HIGH)
+GPIO.output(26, GPIO.LOW)
+p1 = GPIO.PWM(12, 1000)
+p1.start(50)
+p2 = GPIO.PWM(13, 1000)
+p2.start(50)
 
 # Constants for image resizing
 CAM_RESOLUTION = (320, 240)
@@ -62,14 +81,54 @@ def find_targets(img_mask, original_img, draw_contours=False):
         M = cv2.moments(best_cnt)
         centroid = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
 
-        circle_img = cv2.circle(original_img, centroid, 10, (255, 0, 0), 2)
+        #circle_img = cv2.circle(original_img, centroid, 10, (255, 0, 0), 2)
 
         return(centroid)
 
     # If no target of the specified color was found
     else:
         return((False, False))
-
+def goTo(speed, delta):
+    offset = 2
+    if(speed > 100):
+        speed = 100
+    if(speed < 0):
+        speed = 0
+        
+    if(delta >= 1):
+        delta = 0.99
+    if(delta <= -1):
+        delta = -0.99
+        
+    GPIO.output(16, GPIO.HIGH)
+    GPIO.output(26, GPIO.LOW)
+    
+    if((1+delta)*speed > 100):
+        p1.ChangeDutyCycle(100)
+    else:
+        p1.ChangeDutyCycle((1+delta)*speed)
+    if((1-delta)*speed+offset > 100):
+        p2.ChangeDutyCycle(100)
+    else:
+        p2.ChangeDutyCycle((1-delta)*speed+offset)
+        
+        
+def lookTo(delta):
+    if(delta > 2):
+        delta = 2
+    if(delta < -2):
+        delta = -2
+        
+    if(delta < 0):
+        delta = -delta
+        GPIO.output(16, GPIO.LOW)
+        GPIO.output(26, GPIO.LOW)
+    else:
+        GPIO.output(16, GPIO.HIGH)
+        GPIO.output(26, GPIO.HIGH)
+   
+    p1.ChangeDutyCycle((delta)*5)
+    p2.ChangeDutyCycle((delta)*5)
 
 def main():
 
@@ -83,7 +142,7 @@ def main():
 
     # Camera warm-up
     time.sleep(0.1)
-    cv2.namedWindow('Camera')
+    #cv2.namedWindow('Camera')
 
     # Initialize list of visible targets
     target_list = []
@@ -131,9 +190,25 @@ def main():
             # # cv2.putText(frame, color_name, centroid, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
             # cv2.putText(frame, str(centroid_corrected), centroid, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
+        
         # Display image
-        cv2.imshow('Camera', frame)
-
+        #cv2.imshow('Camera', frame)
+        for cent in target_list:
+            if cent[0] == 'blue':
+                pos = cent[1]
+                break
+            else:
+                pos = (False, False)
+       
+        if(pos[0] == False):
+            lookTo(1)
+        else:
+            x_max = CAM_RESOLUTION[0]/2
+            x_min = -x_max
+            delta = (pos[0]/x_max)*0.5
+            goTo(35, delta)
+        
+        
         # Output the target label and centroid
         # for target in target_list:
         #     print(target)
@@ -148,7 +223,7 @@ def main():
             break
 
     # Handle cv2 exit
-    cv2.destroyAllWindows()
+    #cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
