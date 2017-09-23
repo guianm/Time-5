@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 # Constants for image resizing
-DEF_RESOLUTION = (320, 240)
+CAM_RESOLUTION = (320, 240)
 
 # Create color dictionary
 color = dict()
@@ -79,7 +79,7 @@ def main():
 
         # Capture video frame-by-frame and resize it
         ret, frame = cap.read()
-        frame = cv2.resize(frame, DEF_RESOLUTION)
+        frame = cv2.resize(frame, CAM_RESOLUTION)
 
         # Perform pre-processing operations
         proc_img = pre_processing(frame)
@@ -97,7 +97,7 @@ def main():
 
             # Eliminate minor noise
             img_mask = morpho_operation(img_mask)
-            cv2.imshow('Mask for ' + color_name, img_mask)
+            # cv2.imshow('Mask for ' + color_name, img_mask)
 
             # Acquire the biggest color blob centroid
             centroid = find_targets(img_mask, frame, draw_contours=True)
@@ -106,7 +106,20 @@ def main():
             #   Each item is a tuple: ('target label', (x, y))
             #       Ex: ('blue', (10, 50))
             #   If (x, y) = (False, False) no target was found
-            target_list.append((color_name, centroid))
+
+            # Set the middle of the image as the origin (based on image resolution)
+            if centroid[0] is not False:
+                centroid_corrected = tuple(np.subtract(centroid, (CAM_RESOLUTION[0] / 2, CAM_RESOLUTION[1] / 2)))
+
+                # Store the new target
+                target_list.append((color_name, centroid_corrected))
+
+            else:
+                # Store the new target
+                target_list.append((color_name, centroid))
+
+            # cv2.putText(frame, color_name, centroid, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+            cv2.putText(frame, str(centroid_corrected), centroid, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
         # Display image
         cv2.imshow('Camera', frame)
